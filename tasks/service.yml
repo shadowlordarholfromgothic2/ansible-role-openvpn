@@ -1,0 +1,13 @@
+---
+# Reload systemd and (re)start the server now rather than at the end of the
+# play: the start below then runs with the new drop-in, configuration and PKI,
+# and a server that fails on them fails this role, not a later one.
+- name: Apply the pending changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the OpenVPN server
+  ansible.builtin.systemd_service:
+    name: "{{ _openvpn_service }}"
+    enabled: true
+    state: started
+  when: not (_openvpn_unit_missing | bool)

@@ -1,29 +1,129 @@
 ---
 # ==============================================================================
-# template_role - role interface
+# openvpn - role interface
 # ==============================================================================
 # Everything a user of the role may override lives here, with a comment.
 # Internal constants that must not be overridden go to vars/main.yml.
 #
-# Every variable starts with the role name (ansible-lint enforces this).
+# The role never generates keys: the PKI comes from outside (easy-rsa, step-ca,
+# Vault, ...) through the openvpn_*_cert / _key / _crl variables below.
 # ==============================================================================
 
 # ---------- state -------------------------------------------------------------
 
-# present -> the role's config is installed
-# absent  -> the role's config is removed
-template_role_state: present
+# present -> the server instance is configured, enabled and running
+# absent  -> the instance is stopped and its files removed (the package stays)
+openvpn_state: present
 
-# ---------- paths -------------------------------------------------------------
+# Name of the server instance: the role writes /etc/openvpn/server/<name>.conf,
+# keeps its PKI in /etc/openvpn/server/<name>/ and runs openvpn-server@<name>.
+# Run the role once per name for several servers on one host.
+openvpn_instance: server
 
-# Where the role writes its configuration on the managed host.
-template_role_config_dir: /etc/template_role
+# ---------- PKI ---------------------------------------------------------------
 
-# ---------- configuration -----------------------------------------------------
-
-# Key/value pairs rendered into {{ template_role_config_dir }}/config.ini.
+# Each file is given EITHER as its PEM content (e.g. from Ansible Vault) OR as
+# the path of a file on the controller (the `_src` variable) - never both.
+# Relative `_src` paths are looked up like any `file` lookup: the playbook's
+# files/ directory first.
 #
-# template_role_settings:
-#   log_level: info
-#   listen: "127.0.0.1:8080"
-template_role_settings: {}
+#   openvpn_ca_cert_src: pki/ca.crt
+#   openvpn_server_key: "{{ vault_openvpn_server_key }}"
+
+# CA certificate that issued the server and client certificates. Required.
+openvpn_ca_cert: ""
+openvpn_ca_cert_src: ""
+
+# The server's certificate and its unencrypted private key. Required.
+openvpn_server_cert: ""
+openvpn_server_cert_src: ""
+openvpn_server_key: ""
+openvpn_server_key_src: ""
+
+# Shared tls-crypt key ("OpenVPN Static key V1", made by
+# `openvpn --genkey secret tls-crypt.key`). Required.
+openvpn_tls_crypt_key: ""
+openvpn_tls_crypt_key_src: ""
+
+# Certificate revocation list. Optional: leave both empty to run without one.
+# A changed CRL does not restart the server - OpenVPN re-reads it for every
+# new connection and renegotiation (hourly by default).
+openvpn_crl: ""
+openvpn_crl_src: ""
+
+# Hide the key contents from the task output, also in --diff mode.
+openvpn_no_log: true
+
+# ---------- listener ----------------------------------------------------------
+
+openvpn_port: 1194
+# udp | tcp | udp6 | tcp6 (the "6" variants listen on IPv4 and IPv6)
+openvpn_proto: udp
+# Address to bind to. Empty = all addresses.
+openvpn_local: ""
+# "tun" picks the next free tunN; set e.g. "tun0" for a fixed name.
+openvpn_dev: tun
+
+# ---------- tunnel ------------------------------------------------------------
+
+# Address pool for the clients, in CIDR notation (/29 or larger). The server
+# takes the first address.
+openvpn_server_network: 10.8.0.0/24
+# Let clients reach each other through the tunnel.
+openvpn_client_to_client: false
+# Ping every <interval> seconds, assume the peer is gone after <timeout>.
+openvpn_keepalive_interval: 10
+openvpn_keepalive_timeout: 120
+
+# ---------- pushed to the clients ---------------------------------------------
+
+# Networks the clients route through the VPN, in CIDR notation.
+#   openvpn_push_routes:
+#     - 192.168.1.0/24
+openvpn_push_routes: []
+# Route all client traffic through the VPN.
+openvpn_redirect_gateway: false
+# DNS servers and search domain for the clients.
+openvpn_dns_servers: []
+openvpn_dns_domain: ""
+
+# ---------- crypto ------------------------------------------------------------
+
+# Data channel ciphers offered to the clients, in order of preference.
+openvpn_data_ciphers:
+  - AES-256-GCM
+  - AES-128-GCM
+  - CHACHA20-POLY1305
+# "1.2" or "1.3"
+openvpn_tls_version_min: "1.2"
+
+# ---------- process -----------------------------------------------------------
+
+# Unprivileged user and group OpenVPN switches to after start-up. Empty strings
+# keep it running as root.
+openvpn_user: nobody
+openvpn_group: nogroup
+# Log verbosity, 0 (silent) to 11. 3 is the usual production level.
+openvpn_verb: 3
+
+# Extra directives appended to the server configuration, one per line, e.g.
+#   openvpn_extra_config:
+#     - max-clients 20
+#     - server-ipv6 fd42:42:42::/64
+openvpn_extra_config: []
+
+# ---------- routing -----------------------------------------------------------
+
+# Enable IPv4 forwarding (/etc/sysctl.d/99-openvpn-<instance>.conf), needed for
+# clients to reach anything beyond the server itself. Setting it back to false
+# removes the file but leaves the running value alone until the next reboot.
+openvpn_ip_forward: true
+
+# Masquerade the clients' traffic behind the server's address on
+# openvpn_nat_interface, so the LAN needs no route back to the VPN network.
+# Uses an nftables table that exists only while the server runs. It does not
+# open the FORWARD chain: if a firewall (UFW, Docker) drops forwarded packets,
+# allow the tunnel traffic there.
+openvpn_nat_masquerade: false
+# Outgoing interface for the NAT rule. Defaults to the default-route interface.
+openvpn_nat_interface: "{{ ansible_facts.default_ipv4.interface | default('') }}"

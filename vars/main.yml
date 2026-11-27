@@ -1,0 +1,82 @@
+---
+# Internal helpers - not meant to be overridden.
+
+# The systemd unit the distribution ships runs `openvpn --config <name>.conf`
+# from this directory, so the configuration has to live here.
+_openvpn_server_dir: /etc/openvpn/server
+_openvpn_config_file: "{{ _openvpn_server_dir }}/{{ openvpn_instance }}.conf"
+# The instance's PKI files and NAT rules.
+_openvpn_instance_dir: "{{ _openvpn_server_dir }}/{{ openvpn_instance }}"
+_openvpn_service: "openvpn-server@{{ openvpn_instance }}.service"
+_openvpn_dropin_dir: "/etc/systemd/system/{{ _openvpn_service }}.d"
+_openvpn_sysctl_file: "/etc/sysctl.d/99-openvpn-{{ openvpn_instance }}.conf"
+
+# In check mode, a package install.yml would install brings no unit file yet,
+# so the unit can be neither started nor restarted. install.yml does not run
+# under every tag, hence the default().
+_openvpn_unit_missing: "{{ ansible_check_mode and (_openvpn_packages | default({})) is changed }}"
+
+# nftables identifiers allow no dashes.
+_openvpn_nft_table: "openvpn_{{ openvpn_instance | regex_replace('[^A-Za-z0-9_]', '_') }}"
+_openvpn_nat_file: "{{ _openvpn_instance_dir }}/nat.nft"
+
+# Every PKI file the role installs, the variable it comes from (plus that
+# variable with a _src suffix), the PEM block it must contain (`pem`, a regex)
+# and what an error message calls it (`label`, plus an optional `hint`).
+#   kind: cert -> world-readable, a change restarts the server
+#         key  -> root only, hidden from the output, a change restarts the server
+#         crl  -> optional, world-readable (OpenVPN reads it after dropping
+#                 root), picked up without a restart
+_openvpn_pki:
+  - name: ca.crt
+    var: openvpn_ca_cert
+    kind: cert
+    pem: CERTIFICATE
+    label: CERTIFICATE
+  - name: server.crt
+    var: openvpn_server_cert
+    kind: cert
+    pem: CERTIFICATE
+    label: CERTIFICATE
+  - name: server.key
+    var: openvpn_server_key
+    kind: key
+    # No ENCRYPTED variant: the service cannot ask for a passphrase.
+    pem: (RSA |EC )?PRIVATE KEY
+    label: PRIVATE KEY
+    hint: the key must not be encrypted, the service cannot ask for a passphrase
+  - name: tls-crypt.key
+    var: openvpn_tls_crypt_key
+    kind: key
+    pem: OpenVPN Static key V1
+    label: OpenVPN Static key V1
+    hint: create one with `openvpn --genkey secret tls-crypt.key`
+  - name: crl.pem
+    var: openvpn_crl
+    kind: crl
+    pem: X509 CRL
+    label: X509 CRL
+
+# For the _openvpn_pki entry in `item`: whether it was given at all, and its
+# content - inline or read from the file on the controller - without the
+# surrounding whitespace.
+_openvpn_pki_given: >-
+  {{ (lookup('ansible.builtin.vars', item.var) | length > 0)
+     or (lookup('ansible.builtin.vars', item.var ~ '_src') | length > 0) }}
+_openvpn_pki_content: >-
+  {{ (lookup('ansible.builtin.vars', item.var)
+      or lookup('ansible.builtin.file', lookup('ansible.builtin.vars', item.var ~ '_src')))
+     | trim }}
+
+_openvpn_crl_given: "{{ (openvpn_crl | length > 0) or (openvpn_crl_src | length > 0) }}"
+
+# Matches a CIDR network such as 10.8.0.0/24.
+_openvpn_octet: (25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])
+_openvpn_cidr_regex: "^({{ _openvpn_octet }}\\.){3}{{ _openvpn_octet }}/([0-9]|[12][0-9]|3[0-2])$"
+
+# openvpn_server_network as an integer and its prefix length, to check that it
+# has no host bits set (OpenVPN refuses e.g. 10.8.0.1/24).
+_openvpn_server_prefix: "{{ openvpn_server_network.split('/')[-1] | int }}"
+_openvpn_server_address_int: >-
+  {%- set o = openvpn_server_network.split('/')[0].split('.') | map('int') | list -%}
+  {{ o[0] * 16777216 + o[1] * 65536 + o[2] * 256 + o[3] }}

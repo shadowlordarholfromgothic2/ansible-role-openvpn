@@ -1,22 +1,199 @@
 ---
-# Check the host's end state, not the role's output: what would a user log in
-# and look at to tell that the role worked?
+# Check the host's end state, not the role's output: what would a user look at
+# to tell that the role worked? A client that connects and gets the pushed
+# settings, and a revoked one that is turned away.
 - name: Verify
   hosts: all
   become: true
   gather_facts: false
 
-  tasks:
-    - name: Read the rendered configuration file
-      ansible.builtin.slurp:
-        src: /etc/template_role/config.ini
-      register: config
+  vars:
+    molecule_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+    molecule_client_dir: /tmp/molecule-client
+    molecule_clients: [client, revoked]
 
-    - name: Assert the settings were rendered
+  tasks:
+    # ---------- the server ----------------------------------------------------
+
+    - name: Read the state of the server unit
+      ansible.builtin.command:
+        argv: [systemctl, "{{ item }}", openvpn-server@server.service]
+      loop: [is-enabled, is-active]
+      register: molecule_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Assert that the server is enabled and running
       ansible.builtin.assert:
         that:
-          - "'log_level = info' in content"
-          - "'listen = 127.0.0.1:8080' in content"
+          - molecule_unit.results[0].stdout == 'enabled'
+          - molecule_unit.results[1].stdout == 'active'
         quiet: true
-      vars:
-        content: "{{ config.content | b64decode }}"
+
+    - name: List the UDP listeners
+      ansible.builtin.command:
+        argv: [ss, -Hlunp]
+      register: molecule_listeners
+      changed_when: false
+
+    - name: Assert that OpenVPN listens on 1194/udp
+      ansible.builtin.assert:
+        that: molecule_listeners.stdout is search(':1194\s.*"openvpn"')
+        quiet: true
+
+    - name: Read the key files
+      ansible.builtin.stat:
+        path: "/etc/openvpn/server/server/{{ item }}"
+      loop: [server.key, tls-crypt.key]
+      register: molecule_keys
+
+    - name: Assert that only root can read the keys
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == 'root'
+          - item.stat.mode == '0600'
+        quiet: true
+      loop: "{{ molecule_keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ---------- forwarding and NAT --------------------------------------------
+
+    - name: Read the forwarding setting
+      ansible.builtin.slurp:
+        src: /proc/sys/net/ipv4/ip_forward
+      register: molecule_ip_forward
+
+    - name: List the NAT table
+      ansible.builtin.command:
+        argv: [nft, list, table, ip, openvpn_server]
+      register: molecule_nat
+      changed_when: false
+
+    - name: Assert that forwarding is on and the clients are masqueraded
+      ansible.builtin.assert:
+        that:
+          - molecule_ip_forward.content | b64decode | trim == '1'
+          - molecule_nat.stdout is search('ip saddr 10\.8\.0\.0/24 oifname "eth0" masquerade')
+        quiet: true
+
+    # ---------- clients -------------------------------------------------------
+    # The clients share the server's network namespace, so they leave
+    # addresses and routes alone (*-noexec): what is tested is the control
+    # channel - tls-crypt, certificates, CRL and the pushed settings.
+
+    - name: Connect a client and a revoked client
+      block:
+        - name: Create the client directory
+          ansible.builtin.file:
+            path: "{{ molecule_client_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Copy the client PKI files
+          ansible.builtin.copy:
+            src: "{{ molecule_pki }}/{{ item }}"
+            dest: "{{ molecule_client_dir }}/{{ item }}"
+            mode: "0600"
+          loop: [ca.crt, tls-crypt.key, client.crt, client.key, revoked.crt, revoked.key]
+
+        - name: Write the client configurations
+          ansible.builtin.copy:
+            content: |
+              client
+              dev tun
+              proto udp
+              remote 127.0.0.1 1194
+              nobind
+              remote-cert-tls server
+              ca {{ molecule_client_dir }}/ca.crt
+              cert {{ molecule_client_dir }}/{{ item }}.crt
+              key {{ molecule_client_dir }}/{{ item }}.key
+              tls-crypt {{ molecule_client_dir }}/tls-crypt.key
+              ifconfig-noexec
+              route-noexec
+              verb 3
+            dest: "{{ molecule_client_dir }}/{{ item }}.conf"
+            mode: "0600"
+          loop: "{{ molecule_clients }}"
+
+        # verify.yml may run more than once: only what the server logs from
+        # here on counts.
+        - name: Note the time the clients start
+          ansible.builtin.command:
+            argv: [date, "+%Y-%m-%d %H:%M:%S"]
+          register: molecule_start
+          changed_when: false
+
+        - name: Start the clients
+          ansible.builtin.command:
+            argv:
+              - openvpn
+              - --daemon
+              - "molecule-{{ item }}"
+              - --config
+              - "{{ molecule_client_dir }}/{{ item }}.conf"
+              - --log
+              - "{{ molecule_client_dir }}/{{ item }}.log"
+              - --writepid
+              - "{{ molecule_client_dir }}/{{ item }}.pid"
+          loop: "{{ molecule_clients }}"
+          changed_when: true
+
+        - name: Wait for the client to connect
+          ansible.builtin.wait_for:
+            path: "{{ molecule_client_dir }}/client.log"
+            search_regex: Initialization Sequence Completed
+            timeout: 60
+
+        # The server drops the session right after its TLS alert, so the
+        # alert rarely reaches the client - the server's log is the evidence.
+        - name: Wait for the server to turn the revoked client away
+          ansible.builtin.command:
+            argv:
+              - journalctl
+              - --unit=openvpn-server@server.service
+              - --since={{ molecule_start.stdout }}
+              - --output=cat
+              - --no-pager
+          register: molecule_server_log
+          until: molecule_server_log.stdout is search('VERIFY ERROR. depth=0, error=certificate revoked. CN=molecule-revoked')
+          retries: 30
+          delay: 2
+          changed_when: false
+
+        - name: Assert that the revoked client never got a session
+          ansible.builtin.assert:
+            that: molecule_server_log.stdout is not search('\[molecule-revoked\] Peer Connection Initiated')
+            quiet: true
+
+        - name: Read the client log
+          ansible.builtin.slurp:
+            src: "{{ molecule_client_dir }}/client.log"
+          register: molecule_client_log
+
+        - name: Assert that the client got the pushed settings
+          ansible.builtin.assert:
+            that:
+              - molecule_push is search('route 192\.168\.100\.0 255\.255\.255\.0')
+              - molecule_push is search('dhcp-option DNS 10\.8\.0\.1')
+              - molecule_push is search('dhcp-option DOMAIN vpn\.test')
+              - molecule_push is search('ifconfig 10\.8\.0\.\d+ 255\.255\.255\.0')
+            quiet: true
+          vars:
+            molecule_push: >-
+              {{ molecule_client_log.content | b64decode | regex_search('PUSH_REPLY,[^\n]*') | default('', true) }}
+
+      always:
+        - name: Stop the clients
+          ansible.builtin.shell:
+            cmd: 'kill "$(cat {{ molecule_client_dir }}/{{ item }}.pid)"'
+            removes: "{{ molecule_client_dir }}/{{ item }}.pid"
+          loop: "{{ molecule_clients }}"
+          changed_when: true
+
+        - name: Remove the client directory
+          ansible.builtin.file:
+            path: "{{ molecule_client_dir }}"
+            state: absent

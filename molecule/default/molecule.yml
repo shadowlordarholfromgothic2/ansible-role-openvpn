@@ -1,6 +1,6 @@
 ---
-# Runs the role in a throwaway container and proves it converges, is
-# idempotent and leaves the host in the expected state.
+# Runs the role in throwaway containers and proves it converges, is
+# idempotent and serves a client - and refuses a revoked one.
 #
 #   pip install -r requirements-dev.txt
 #   molecule test
@@ -9,9 +9,19 @@ driver:
   name: docker
 
 platforms:
-  # Images with systemd as PID 1, so roles that manage services can be tested.
-  - name: template-role-debian13
+  # Images with systemd as PID 1, so the openvpn-server@ unit runs as it does
+  # on a VM. Privileged for /dev/net/tun, sysctl and nftables.
+  - name: openvpn-debian13
     image: geerlingguy/docker-debian13-ansible:latest
+    command: /lib/systemd/systemd
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+  - name: openvpn-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible:latest
     command: /lib/systemd/systemd
     pre_build_image: true
     privileged: true
@@ -32,6 +42,7 @@ scenario:
   test_sequence:
     - destroy
     - create
+    - prepare
     - converge
     - idempotence     # the important one
     - verify

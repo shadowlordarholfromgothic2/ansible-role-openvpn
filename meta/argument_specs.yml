@@ -1,0 +1,193 @@
+---
+# The role's variables, for `ansible-doc -t role` and for the argument
+# validation Ansible runs before the role's first task. The defaults here are
+# documentation only - the role takes its values from defaults/main.yml, so keep
+# the two in sync. tasks/validate.yml checks what types and choices cannot.
+argument_specs:
+  main:
+    short_description: Deploys an OpenVPN server from an existing PKI
+    description:
+      - Installs OpenVPN and runs one server instance as
+        C(openvpn-server@<instance>.service), with the CA certificate, server
+        certificate and key, tls-crypt key and CRL it is given.
+      - The role never generates keys or certificates.
+      - Optionally enables IPv4 forwarding and masquerades the clients' traffic.
+      - Supports Debian and Ubuntu hosts.
+    author:
+      - Kirill
+    options:
+      # ---------- state ---------------------------------------------------
+      openvpn_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description:
+          - V(present) configures, enables and starts the instance.
+          - V(absent) stops it and removes its files. The package stays.
+      openvpn_instance:
+        type: str
+        default: server
+        description:
+          - Name of the server instance, used for its configuration file,
+            PKI directory and systemd unit. Letters, digits, C(_) and C(-).
+
+      # ---------- PKI -----------------------------------------------------
+      openvpn_ca_cert:
+        type: str
+        default: ""
+        description: PEM content of the CA certificate. Required, or O(openvpn_ca_cert_src).
+      openvpn_ca_cert_src:
+        type: str
+        default: ""
+        description: Path on the controller to the CA certificate.
+      openvpn_server_cert:
+        type: str
+        default: ""
+        description: PEM content of the server certificate. Required, or O(openvpn_server_cert_src).
+      openvpn_server_cert_src:
+        type: str
+        default: ""
+        description: Path on the controller to the server certificate.
+      openvpn_server_key:
+        type: str
+        default: ""
+        no_log: true
+        description:
+          - PEM content of the unencrypted server key. Required, or O(openvpn_server_key_src).
+      openvpn_server_key_src:
+        type: str
+        default: ""
+        description: Path on the controller to the server key.
+      openvpn_tls_crypt_key:
+        type: str
+        default: ""
+        no_log: true
+        description:
+          - Content of the tls-crypt key (C(OpenVPN Static key V1)). Required,
+            or O(openvpn_tls_crypt_key_src).
+      openvpn_tls_crypt_key_src:
+        type: str
+        default: ""
+        description: Path on the controller to the tls-crypt key.
+      openvpn_crl:
+        type: str
+        default: ""
+        description:
+          - PEM content of the certificate revocation list. Optional.
+          - A changed CRL is picked up without restarting the server.
+      openvpn_crl_src:
+        type: str
+        default: ""
+        description: Path on the controller to the certificate revocation list.
+      openvpn_no_log:
+        type: bool
+        default: true
+        description: Hide the key contents from the task output.
+
+      # ---------- listener ------------------------------------------------
+      openvpn_port:
+        type: int
+        default: 1194
+        description: Port the server listens on.
+      openvpn_proto:
+        type: str
+        choices: [udp, tcp, udp6, tcp6]
+        default: udp
+        description: Transport protocol. The C(6) variants listen on IPv4 and IPv6.
+      openvpn_local:
+        type: str
+        default: ""
+        description: Address to bind to. Empty binds to all addresses.
+      openvpn_dev:
+        type: str
+        default: tun
+        description: Tunnel device, V(tun) for the next free one or e.g. V(tun0).
+
+      # ---------- tunnel --------------------------------------------------
+      openvpn_server_network:
+        type: str
+        default: 10.8.0.0/24
+        description: Client address pool in CIDR notation, /29 or larger.
+      openvpn_client_to_client:
+        type: bool
+        default: false
+        description: Let clients reach each other through the tunnel.
+      openvpn_keepalive_interval:
+        type: int
+        default: 10
+        description: Seconds between pings to an idle peer.
+      openvpn_keepalive_timeout:
+        type: int
+        default: 120
+        description: Seconds without traffic after which a peer is considered gone.
+
+      # ---------- pushed to the clients -----------------------------------
+      openvpn_push_routes:
+        type: list
+        elements: str
+        default: []
+        description: Networks, in CIDR notation, the clients route through the VPN.
+      openvpn_redirect_gateway:
+        type: bool
+        default: false
+        description: Route all client traffic through the VPN.
+      openvpn_dns_servers:
+        type: list
+        elements: str
+        default: []
+        description: DNS servers pushed to the clients.
+      openvpn_dns_domain:
+        type: str
+        default: ""
+        description: DNS search domain pushed to the clients.
+
+      # ---------- crypto --------------------------------------------------
+      openvpn_data_ciphers:
+        type: list
+        elements: str
+        default: [AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305]
+        description: Data channel ciphers, in order of preference.
+      openvpn_tls_version_min:
+        type: str
+        choices: ["1.2", "1.3"]
+        default: "1.2"
+        description: Oldest TLS version accepted on the control channel.
+
+      # ---------- process -------------------------------------------------
+      openvpn_user:
+        type: str
+        default: nobody
+        description: User OpenVPN switches to after start-up. Empty keeps root.
+      openvpn_group:
+        type: str
+        default: nogroup
+        description: Group OpenVPN switches to after start-up. Empty keeps root.
+      openvpn_verb:
+        type: int
+        choices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        default: 3
+        description: Log verbosity.
+      openvpn_extra_config:
+        type: list
+        elements: str
+        default: []
+        description: Extra directives appended to the server configuration, one per line.
+
+      # ---------- routing -------------------------------------------------
+      openvpn_ip_forward:
+        type: bool
+        default: true
+        description:
+          - Enable IPv4 forwarding through a file in C(/etc/sysctl.d).
+          - V(false) removes that file but leaves the running value alone.
+      openvpn_nat_masquerade:
+        type: bool
+        default: false
+        description:
+          - Masquerade the clients' traffic behind the server's address with an
+            nftables table that exists only while the server runs.
+          - Does not open the FORWARD chain of a firewall.
+      openvpn_nat_interface:
+        type: str
+        default: "{{ ansible_facts.default_ipv4.interface | default('') }}"
+        description: Outgoing interface for the NAT rule. Defaults to the default-route interface.

@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Loads the NAT rules of the OpenVPN server "{{ openvpn_instance }}" when it
+# has started and deletes them when it stops. "+" runs nft outside the unit's
+# sandbox, "-" ignores a table that is already gone.
+[Service]
+ExecStartPost=+/usr/sbin/nft --file {{ _openvpn_nat_file }}
+ExecStopPost=-+/usr/sbin/nft delete table ip {{ _openvpn_nft_table }}
