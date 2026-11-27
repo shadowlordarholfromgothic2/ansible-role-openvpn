@@ -1,0 +1,76 @@
+{# "10.8.0.0/24" -> "10.8.0.0 255.255.255.0", the form OpenVPN expects #}
+{% macro network(cidr) -%}
+{% set mask = 2 ** 32 - 2 ** (32 - (cidr.split('/')[1] | int)) -%}
+{{ cidr.split('/')[0] }} {{ [mask // 16777216, mask // 65536 % 256, mask // 256 % 256, mask % 256] | join('.') }}
+{%- endmacro %}
+# {{ ansible_managed }}
+# OpenVPN server "{{ openvpn_instance }}", run by {{ _openvpn_service }}.
+# Rendered by the openvpn role - do not edit on the host.
+
+# ---------- listener ----------------------------------------------------------
+{% if openvpn_local | length > 0 %}
+local {{ openvpn_local }}
+{% endif %}
+port {{ openvpn_port }}
+proto {{ openvpn_proto }}{{ '-server' if openvpn_proto.startswith('tcp') else '' }}
+dev {{ openvpn_dev }}
+
+# ---------- tunnel ------------------------------------------------------------
+topology subnet
+server {{ network(openvpn_server_network) }}
+keepalive {{ openvpn_keepalive_interval }} {{ openvpn_keepalive_timeout }}
+{% if openvpn_client_to_client | bool %}
+client-to-client
+{% endif %}
+{% if openvpn_proto.startswith('udp') %}
+# Tell the clients to reconnect right away when the server restarts.
+explicit-exit-notify 1
+{% endif %}
+{% if openvpn_push_routes or openvpn_redirect_gateway | bool or openvpn_dns_servers or openvpn_dns_domain %}
+
+# ---------- pushed to the clients ---------------------------------------------
+{% for route in openvpn_push_routes %}
+push "route {{ network(route) }}"
+{% endfor %}
+{% if openvpn_redirect_gateway | bool %}
+push "redirect-gateway def1 bypass-dhcp"
+{% endif %}
+{% for server in openvpn_dns_servers %}
+push "dhcp-option DNS {{ server }}"
+{% endfor %}
+{% if openvpn_dns_domain | length > 0 %}
+push "dhcp-option DOMAIN {{ openvpn_dns_domain }}"
+{% endif %}
+{% endif %}
+
+# ---------- PKI ---------------------------------------------------------------
+ca {{ _openvpn_instance_dir }}/ca.crt
+cert {{ _openvpn_instance_dir }}/server.crt
+key {{ _openvpn_instance_dir }}/server.key
+tls-crypt {{ _openvpn_instance_dir }}/tls-crypt.key
+{% if _openvpn_crl_given | bool %}
+crl-verify {{ _openvpn_instance_dir }}/crl.pem
+{% endif %}
+# Key exchange with ECDHE only: no Diffie-Hellman parameters to manage.
+dh none
+remote-cert-tls client
+tls-version-min {{ openvpn_tls_version_min }}
+data-ciphers {{ openvpn_data_ciphers | join(':') }}
+
+# ---------- process -----------------------------------------------------------
+{% if openvpn_user | length > 0 %}
+user {{ openvpn_user }}
+{% endif %}
+{% if openvpn_group | length > 0 %}
+group {{ openvpn_group }}
+{% endif %}
+persist-key
+persist-tun
+verb {{ openvpn_verb }}
+{% if openvpn_extra_config %}
+
+# ---------- extra (openvpn_extra_config) --------------------------------------
+{% for line in openvpn_extra_config %}
+{{ line }}
+{% endfor %}
+{% endif %}

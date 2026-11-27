@@ -1,0 +1,30 @@
+---
+# Removes what the role created for this instance. The openvpn package stays:
+# other instances or client configurations may still use it.
+
+# First, so that the server's own ExecStopPost deletes its NAT table. A host
+# without the package has no unit to stop.
+- name: Stop and disable the OpenVPN server
+  ansible.builtin.systemd_service:
+    name: "{{ _openvpn_service }}"
+    state: stopped
+    enabled: false
+  register: _openvpn_stop
+  failed_when:
+    - _openvpn_stop is failed
+    - "'Could not find the requested service' not in _openvpn_stop.msg | default('')"
+
+- name: Remove the drop-in directory of the service
+  ansible.builtin.file:
+    path: "{{ _openvpn_dropin_dir }}"
+    state: absent
+  notify: [openvpn daemon-reload, openvpn nat removed]
+
+- name: Remove the configuration, PKI and sysctl files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ _openvpn_config_file }}"
+    - "{{ _openvpn_instance_dir }}"
+    - "{{ _openvpn_sysctl_file }}"

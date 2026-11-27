@@ -1,0 +1,104 @@
+---
+# Checks that need more than the types and choices meta/argument_specs.yml
+# already enforces. All of them run on the controller, before anything changes.
+
+- name: Assert that the target platform is supported
+  ansible.builtin.assert:
+    that: ansible_facts.os_family == 'Debian'
+    fail_msg: >-
+      openvpn: the role supports Debian and Ubuntu hosts, this one reports
+      os_family '{{ ansible_facts.os_family }}'.
+    quiet: true
+
+- name: Assert that the instance name is usable
+  ansible.builtin.assert:
+    that:
+      - openvpn_state in ['present', 'absent']
+      - openvpn_instance is match('^[A-Za-z0-9_][A-Za-z0-9_-]*$')
+    fail_msg: >-
+      openvpn: needs openvpn_state present/absent and an openvpn_instance made
+      of letters, digits, '_' and '-' (got state='{{ openvpn_state }}',
+      instance='{{ openvpn_instance }}').
+    quiet: true
+
+- name: Validate the server settings
+  when: openvpn_state == 'present'
+  block:
+    - name: Assert that the listener settings are valid
+      ansible.builtin.assert:
+        that:
+          - (openvpn_port | int) >= 1
+          - (openvpn_port | int) <= 65535
+          - openvpn_proto in ['udp', 'tcp', 'udp6', 'tcp6']
+          - (openvpn_keepalive_interval | int) > 0
+          - (openvpn_keepalive_timeout | int) > (openvpn_keepalive_interval | int)
+        fail_msg: >-
+          openvpn: needs openvpn_port between 1 and 65535, openvpn_proto one
+          of udp/tcp/udp6/tcp6 and an openvpn_keepalive_timeout longer than
+          openvpn_keepalive_interval (got port={{ openvpn_port }},
+          proto={{ openvpn_proto }}, keepalive={{ openvpn_keepalive_interval }}
+          {{ openvpn_keepalive_timeout }}).
+        quiet: true
+
+    - name: Assert that the networks are in CIDR notation
+      ansible.builtin.assert:
+        that: item is match(_openvpn_cidr_regex)
+        fail_msg: "openvpn: '{{ item }}' is not a network in CIDR notation such as 192.168.1.0/24."
+        quiet: true
+      loop: "{{ [openvpn_server_network] + openvpn_push_routes }}"
+
+    # OpenVPN refuses a pool smaller than /29, and one with host bits set.
+    - name: Assert that the client address pool is usable
+      ansible.builtin.assert:
+        that:
+          - (_openvpn_server_prefix | int) <= 29
+          - (_openvpn_server_address_int | int) % (2 ** (32 - (_openvpn_server_prefix | int))) == 0
+        fail_msg: >-
+          openvpn: openvpn_server_network must be a network address with a
+          prefix of /29 or shorter, e.g. 10.8.0.0/24
+          (got '{{ openvpn_server_network }}').
+        quiet: true
+
+    - name: Assert that NAT has an outgoing interface
+      ansible.builtin.assert:
+        that: openvpn_nat_interface | length > 0
+        fail_msg: >-
+          openvpn: openvpn_nat_masquerade needs openvpn_nat_interface - the
+          host has no default route to take it from.
+        quiet: true
+      when: openvpn_nat_masquerade | bool
+
+    - name: Assert that every PKI file is given once
+      ansible.builtin.assert:
+        that:
+          - not (_content | length > 0 and _src | length > 0)
+          - item.kind == 'crl' or _content | length > 0 or _src | length > 0
+        fail_msg: >-
+          openvpn: {{ item.name }} needs either its content in {{ item.var }}
+          or the path of a file on the controller in {{ item.var }}_src -
+          {{ 'one of them, or neither to run without a CRL' if item.kind == 'crl'
+             else 'exactly one of them' }}.
+        quiet: true
+      loop: "{{ _openvpn_pki }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        _content: "{{ lookup('ansible.builtin.vars', item.var) }}"
+        _src: "{{ lookup('ansible.builtin.vars', item.var ~ '_src') }}"
+
+    # OpenVPN would only find out when the service starts. An easy-rsa
+    # certificate carries a text dump before its PEM block, hence search().
+    - name: Assert that the PKI files are PEM-encoded
+      ansible.builtin.assert:
+        that: >-
+          _openvpn_pki_content is search('-----BEGIN ' ~ item.pem ~ '-----\s+[A-Za-z0-9+/=\s]+-----END '
+          ~ item.pem ~ '-----')
+        fail_msg: >-
+          openvpn: {{ item.name }} (from {{ item.var }}{{ '' if lookup('ansible.builtin.vars', item.var)
+          else '_src' }}) has no complete '-----BEGIN {{ item.label }}-----' block{{
+          ' - ' ~ item.hint if item.hint is defined else '' }}.
+        quiet: true
+      loop: "{{ _openvpn_pki }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: _openvpn_pki_given | bool

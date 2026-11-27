@@ -1,55 +1,70 @@
 ---
+- name: Gather facts when the play did not
+  ansible.builtin.setup:
+  when: ansible_facts.os_family is not defined
+  tags: [always]
+
 # ==============================================================================
 # 1. FAIL FAST - validate input before touching anything
 # ==============================================================================
 
-- name: Validate role input
-  ansible.builtin.assert:
-    that:
-      - template_role_state in ['present', 'absent']
-      - template_role_config_dir is match('^/')
-      - template_role_settings is mapping
-    fail_msg: >-
-      template_role: needs template_role_state present/absent, an absolute
-      template_role_config_dir and a dict in template_role_settings
-      (got state='{{ template_role_state }}',
-      config_dir='{{ template_role_config_dir }}')
-    quiet: true
+- name: Validate the role input
+  ansible.builtin.import_tasks:
+    file: validate.yml
   tags: [always]
 
 # ==============================================================================
 # 2. TEARDOWN - a separate path, so the rest of the file only handles 'present'
 # ==============================================================================
 
-- name: Remove the configuration
-  ansible.builtin.file:
-    path: "{{ template_role_config_dir }}"
-    state: absent
-  when: template_role_state == 'absent'
-  tags: [config]
+- name: Remove the OpenVPN server instance
+  ansible.builtin.include_tasks:
+    file: absent.yml
+    apply:
+      tags: [openvpn]
+  when: openvpn_state == 'absent'
+  tags: [openvpn]
 
 # ==============================================================================
-# 3. CONFIGURE
+# 3. DEPLOY
 # ==============================================================================
 
-- name: Configure template_role
-  when: template_role_state == 'present'
-  tags: [config]
-  block:
-    - name: Create the configuration directory
-      ansible.builtin.file:
-        path: "{{ template_role_config_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+- name: Install OpenVPN
+  ansible.builtin.include_tasks:
+    file: install.yml
+    apply:
+      tags: [openvpn, openvpn_install]
+  when: openvpn_state == 'present'
+  tags: [openvpn, openvpn_install]
 
-    - name: Render the configuration file
-      ansible.builtin.template:
-        src: config.ini.j2
-        dest: "{{ template_role_config_dir }}/config.ini"
-        owner: root
-        group: root
-        mode: "0644"
-        backup: true
-      notify: template_role config changed
+- name: Install the PKI files
+  ansible.builtin.include_tasks:
+    file: pki.yml
+    apply:
+      tags: [openvpn, openvpn_pki]
+  when: openvpn_state == 'present'
+  tags: [openvpn, openvpn_pki]
+
+- name: Configure the OpenVPN server
+  ansible.builtin.include_tasks:
+    file: config.yml
+    apply:
+      tags: [openvpn, openvpn_config]
+  when: openvpn_state == 'present'
+  tags: [openvpn, openvpn_config]
+
+- name: Configure IP forwarding and NAT
+  ansible.builtin.include_tasks:
+    file: routing.yml
+    apply:
+      tags: [openvpn, openvpn_routing]
+  when: openvpn_state == 'present'
+  tags: [openvpn, openvpn_routing]
+
+- name: Start the OpenVPN server
+  ansible.builtin.include_tasks:
+    file: service.yml
+    apply:
+      tags: [openvpn, openvpn_service]
+  when: openvpn_state == 'present'
+  tags: [openvpn, openvpn_service]

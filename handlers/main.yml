@@ -1,13 +1,28 @@
 ---
 # Handlers are notified by their `listen` topic, not by their name, so the name
-# can change without breaking the tasks that notify it.
-#
-# TODO: replace the placeholder with the real action, e.g.
-#   ansible.builtin.systemd_service:
-#     name: myservice
-#     state: restarted
+# can change without breaking the tasks that notify it. They run in the order
+# they are written here: systemd first learns about a changed drop-in, then the
+# server restarts with it.
 
-- name: Apply template_role configuration
-  ansible.builtin.debug:
-    msg: "template_role: configuration changed - TODO: reload the service"
-  listen: template_role config changed
+- name: Reload the systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: openvpn daemon-reload
+
+# A missing table is fine: the server deleted it when it stopped.
+- name: Delete the NAT table
+  ansible.builtin.command:
+    argv: [nft, delete, table, ip, "{{ _openvpn_nft_table }}"]
+  register: _openvpn_nft_delete
+  changed_when: _openvpn_nft_delete.rc == 0
+  failed_when:
+    - _openvpn_nft_delete.rc != 0
+    - "'No such file or directory' not in (_openvpn_nft_delete.stderr | default('')) ~ (_openvpn_nft_delete.msg | default(''))"
+  listen: openvpn nat removed
+
+- name: Restart the OpenVPN server
+  ansible.builtin.systemd_service:
+    name: "{{ _openvpn_service }}"
+    state: restarted
+  when: not (_openvpn_unit_missing | bool)
+  listen: openvpn restart

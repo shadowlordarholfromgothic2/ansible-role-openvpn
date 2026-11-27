@@ -1,0 +1,69 @@
+---
+# ---------- IP forwarding -----------------------------------------------------
+
+- name: Enable IPv4 forwarding
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: "{{ _openvpn_sysctl_file }}"
+    sysctl_set: true
+    state: present
+  when: openvpn_ip_forward | bool
+
+# Leaves the running value alone: something else on the host (Docker, another
+# instance) may rely on forwarding as well.
+- name: Remove the IPv4 forwarding setting
+  ansible.builtin.file:
+    path: "{{ _openvpn_sysctl_file }}"
+    state: absent
+  when: not (openvpn_ip_forward | bool)
+
+# ---------- NAT ---------------------------------------------------------------
+# The rules live in their own nftables table, which a systemd drop-in loads
+# when the server has started and deletes when it stops. They never outlive
+# the server, and need neither iptables-persistent nor a reboot-safe ruleset.
+
+- name: Set up NAT for the clients
+  when: openvpn_nat_masquerade | bool
+  block:
+    - name: Render the NAT rules
+      ansible.builtin.template:
+        src: nat.nft.j2
+        dest: "{{ _openvpn_nat_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: nft --check --file %s
+      notify: openvpn restart
+
+    - name: Create the drop-in directory of the service
+      ansible.builtin.file:
+        path: "{{ _openvpn_dropin_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Load the NAT rules together with the server
+      ansible.builtin.template:
+        src: nat.conf.j2
+        dest: "{{ _openvpn_dropin_dir }}/nat.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: [openvpn daemon-reload, openvpn restart]
+
+# The server no longer deletes the table when it stops, so the handler does.
+- name: Remove NAT for the clients
+  when: not (openvpn_nat_masquerade | bool)
+  block:
+    - name: Remove the NAT drop-in
+      ansible.builtin.file:
+        path: "{{ _openvpn_dropin_dir }}/nat.conf"
+        state: absent
+      notify: [openvpn daemon-reload, openvpn nat removed]
+
+    - name: Remove the NAT rules
+      ansible.builtin.file:
+        path: "{{ _openvpn_nat_file }}"
+        state: absent

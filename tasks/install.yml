@@ -1,0 +1,10 @@
+---
+# The package brings the openvpn-server@.service template unit the role runs
+# the server with. nftables is only needed for the NAT rules.
+- name: Install the OpenVPN packages
+  ansible.builtin.apt:
+    name: "{{ ['openvpn'] + (['nftables'] if openvpn_nat_masquerade | bool else []) }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: _openvpn_packages

@@ -1,0 +1,16 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# NAT for the clients of the OpenVPN server "{{ openvpn_instance }}". Loaded by
+# {{ _openvpn_service }} once it has started, deleted when it stops.
+
+# Declaring the table before deleting it makes the delete succeed when the
+# table does not exist yet, so loading this file replaces it in one go.
+table ip {{ _openvpn_nft_table }}
+delete table ip {{ _openvpn_nft_table }}
+
+table ip {{ _openvpn_nft_table }} {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr {{ openvpn_server_network }} oifname "{{ openvpn_nat_interface }}" masquerade
+  }
+}

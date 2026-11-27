@@ -1,0 +1,59 @@
+---
+# Only copies what it is given - the role never creates keys or certificates.
+# validate.yml has already checked every file.
+
+# Traversable by everyone: OpenVPN reads the CRL after it has dropped root.
+- name: Create the instance directory
+  ansible.builtin.file:
+    path: "{{ _openvpn_instance_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the certificates
+  ansible.builtin.copy:
+    content: "{{ _openvpn_pki_content }}\n"
+    dest: "{{ _openvpn_instance_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _openvpn_pki | selectattr('kind', 'eq', 'cert') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: openvpn restart
+
+# Read once at start-up, while OpenVPN still runs as root.
+- name: Install the keys
+  ansible.builtin.copy:
+    content: "{{ _openvpn_pki_content }}\n"
+    dest: "{{ _openvpn_instance_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _openvpn_pki | selectattr('kind', 'eq', 'key') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: "{{ openvpn_no_log }}"
+  diff: false
+  notify: openvpn restart
+
+# No restart: OpenVPN re-reads the file for every new connection and
+# renegotiation, so connected clients stay connected.
+- name: Install the certificate revocation list
+  ansible.builtin.copy:
+    content: "{{ _openvpn_pki_content }}\n"
+    dest: "{{ _openvpn_instance_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _openvpn_pki | selectattr('kind', 'eq', 'crl') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: _openvpn_pki_given | bool
+
+- name: Remove the certificate revocation list
+  ansible.builtin.file:
+    path: "{{ _openvpn_instance_dir }}/crl.pem"
+    state: absent
+  when: not (_openvpn_crl_given | bool)

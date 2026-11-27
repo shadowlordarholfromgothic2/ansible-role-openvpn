@@ -1,0 +1,111 @@
+---
+# The role takes its PKI from outside and never creates one, so the test has
+# to: a throwaway CA on the controller, in Molecule's ephemeral directory (gone
+# after `molecule destroy`), so that no key is ever committed. Besides the
+# server's files it issues a client certificate for verify.yml to connect
+# with, and a second one that the CRL revokes.
+- name: Prepare
+  hosts: all
+  gather_facts: false
+
+  vars:
+    molecule_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+    molecule_leaves:
+      - name: server
+        usage: serverAuth
+      - name: client
+        usage: clientAuth
+      - name: revoked
+        usage: clientAuth
+
+  tasks:
+    - name: Create the test PKI on the controller
+      delegate_to: localhost
+      run_once: true
+      become: false
+      block:
+        - name: Create the PKI directory
+          ansible.builtin.file:
+            path: "{{ molecule_pki }}"
+            state: directory
+            mode: "0700"
+
+        - name: Create the keys
+          community.crypto.openssl_privatekey:
+            path: "{{ molecule_pki }}/{{ item }}.key"
+            type: ECC
+            curve: secp256r1
+            mode: "0600"
+          loop: [ca, server, client, revoked]
+
+        - name: Create the CA's signing request
+          community.crypto.openssl_csr_pipe:
+            privatekey_path: "{{ molecule_pki }}/ca.key"
+            common_name: Molecule CA
+            use_common_name_for_san: false
+            basic_constraints: ["CA:TRUE"]
+            basic_constraints_critical: true
+            key_usage: [keyCertSign, cRLSign]
+            key_usage_critical: true
+          register: molecule_ca_csr
+
+        - name: Self-sign the CA certificate
+          community.crypto.x509_certificate:
+            path: "{{ molecule_pki }}/ca.crt"
+            csr_content: "{{ molecule_ca_csr.csr }}"
+            privatekey_path: "{{ molecule_pki }}/ca.key"
+            provider: selfsigned
+            selfsigned_not_after: "+3650d"
+            mode: "0644"
+
+        - name: Create the signing requests of the server and the clients
+          community.crypto.openssl_csr_pipe:
+            privatekey_path: "{{ molecule_pki }}/{{ item.name }}.key"
+            common_name: "molecule-{{ item.name }}"
+            use_common_name_for_san: false
+            key_usage: [digitalSignature]
+            extended_key_usage: ["{{ item.usage }}"]
+          loop: "{{ molecule_leaves }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: molecule_leaf_csrs
+
+        - name: Issue the certificates of the server and the clients
+          community.crypto.x509_certificate:
+            path: "{{ molecule_pki }}/{{ item.item.name }}.crt"
+            csr_content: "{{ item.csr }}"
+            provider: ownca
+            ownca_path: "{{ molecule_pki }}/ca.crt"
+            ownca_privatekey_path: "{{ molecule_pki }}/ca.key"
+            ownca_not_after: "+3650d"
+            mode: "0644"
+          loop: "{{ molecule_leaf_csrs.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: Revoke the second client certificate
+          community.crypto.x509_crl:
+            path: "{{ molecule_pki }}/crl.pem"
+            privatekey_path: "{{ molecule_pki }}/ca.key"
+            issuer:
+              CN: Molecule CA
+            last_update: "+0s"
+            next_update: "+3650d"
+            revoked_certificates:
+              - path: "{{ molecule_pki }}/revoked.crt"
+            mode: "0644"
+
+        # What `openvpn --genkey secret` writes: 256 random bytes as 16 lines
+        # of hex.
+        - name: Create the tls-crypt key
+          ansible.builtin.copy:
+            content: |
+              -----BEGIN OpenVPN Static key V1-----
+              {% for line in molecule_hex | batch(32) -%}
+              {{ line | join }}
+              {% endfor -%}
+              -----END OpenVPN Static key V1-----
+            dest: "{{ molecule_pki }}/tls-crypt.key"
+            mode: "0600"
+          vars:
+            molecule_hex: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['0123456789abcdef'], length=512) }}"
